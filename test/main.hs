@@ -4,19 +4,19 @@
 import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
 import Test.QuickCheck (Arbitrary (..))
-
+import Data.Foldable (fold)
 import Data.Streaming.Zlib
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Internal as LI
-import Control.Monad (foldM, forM_, forM)
+import Control.Monad (foldM, forM_)
 import System.IO.Unsafe (unsafePerformIO)
 import Codec.Compression.Zlib hiding (WindowBits, defaultWindowBits)
 import qualified Codec.Compression.GZip as Gzip
 import qualified Codec.Compression.Zlib.Raw as Raw
 
-runPopper :: ([S8.ByteString] -> c) -> IO PopperRes -> IO ([S8.ByteString] -> c)
+runPopper :: ([S8.ByteString] -> c) -> Popper -> IO ([S8.ByteString] -> c)
 runPopper front x = do
     y <- x
     case y of
@@ -133,22 +133,22 @@ main = hspec $ do
             deflated <- foldM (go' def) id $ L.toChunks lbs
             deflated' <- runPopper deflated $ finishDeflate def
             return $ lbs == decompress (L.fromChunks (deflated' []))
-{-
+
     describe "flushing" $ do
         let helper wb = do
                 let bss0 = replicate 5000 "abc"
                 def <- initDeflate 9 wb
                 inf <- initInflate wb
 
-                let
-                  callback :: String -> [S8.ByteString] -> IO PopperRes -> IO ()
-                  callback name expected pop = do
-                        bssDeflated <- runPopper id pop
-                        bsInflated <- -- fmap (S.concat . ($ mempty)) $
-                          (forM bssDeflated $ \bs -> do
-                            x <- fmap ($ mempty) . runPopper id =<< feedInflate inf bs
-                            y <- flushInflate inf
-                            return $ x ++ [y] ) (return id)
+                let callback name expected pop = do
+                        bssDeflated <-  runPopper id pop
+                        bsInflated  <- fmap (fold . fold)
+                                       . (mapM $ \bs -> do
+                                             x <- fmap ($ mempty) . runPopper id =<< feedInflate inf bs
+                                             y <- flushInflate inf
+                                             return $ x ++ [y] )
+                                       . bssDeflated $ mempty
+
                         if bsInflated == expected
                             then return ()
                             else error $ "callback " ++ name ++ ", got: " ++ show bsInflated ++ ", expected: " ++ show expected
@@ -159,7 +159,7 @@ main = hspec $ do
                 callback "finish" "" $ finishDeflate def
         it "zlib" $ helper defaultWindowBits
         it "gzip" $ helper $ WindowBits 31
--}
+
     describe "large raw #9" $ do
         let size = fromIntegral $ LI.defaultChunkSize * 4 + 1
             input = L.replicate size 10
