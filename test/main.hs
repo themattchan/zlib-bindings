@@ -141,13 +141,14 @@ main = hspec $ do
                 inf <- initInflate wb
 
                 let callback name expected pop = do
-                        bssDeflated <-  runPopper id pop
+                        bssDeflated <- runPopper id pop
                         bsInflated  <- fmap (fold . fold)
                                        . (mapM $ \bs -> do
                                              x <- fmap ($ mempty) . runPopper id =<< feedInflate inf bs
                                              y <- flushInflate inf
                                              return $ x ++ [y] )
-                                       . bssDeflated $ mempty
+                                       . bssDeflated
+                                       $ mempty
 
                         if bsInflated == expected
                             then return ()
