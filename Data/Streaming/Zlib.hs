@@ -18,7 +18,7 @@
 --
 -- You can see a more complete example is available in the included
 -- file-test.hs.
-module Codec.Zlib
+module Data.Streaming.Zlib
     ( -- * Inflate
       Inflate
     , initInflate
@@ -26,6 +26,8 @@ module Codec.Zlib
     , feedInflate
     , finishInflate
     , flushInflate
+    , getUnusedInflate
+    , isCompleteInflate
       -- * Deflate
     , Deflate
     , initDeflate
@@ -33,30 +35,36 @@ module Codec.Zlib
     , feedDeflate
     , finishDeflate
     , flushDeflate
+    , fullFlushDeflate
       -- * Data types
     , WindowBits (..)
     , defaultWindowBits
     , ZlibException (..)
     , Popper
+    , PopperRes (..)
     ) where
 
-import Codec.Zlib.Lowlevel
+import Data.Streaming.Zlib.Lowlevel
 import Foreign.ForeignPtr
 import Foreign.C.Types
 import Data.ByteString.Unsafe
-import Codec.Compression.Zlib (WindowBits(WindowBits), defaultWindowBits)
 import qualified Data.ByteString as S
 import Data.ByteString.Lazy.Internal (defaultChunkSize)
-import Control.Monad (when)
 import Data.Typeable (Typeable)
-import Control.Exception (Exception, throwIO)
+import Control.Exception (Exception)
+import Control.Monad (when)
+import Data.IORef
 
 type ZStreamPair = (ForeignPtr ZStreamStruct, ForeignPtr CChar)
 
 -- | The state of an inflation (eg, decompression) process. All allocated
 -- memory is automatically reclaimed by the garbage collector.
 -- Also can contain the inflation dictionary that is used for decompression.
-newtype Inflate = Inflate (ZStreamPair, Maybe S.ByteString)
+data Inflate = Inflate
+    ZStreamPair
+    (IORef S.ByteString) -- last ByteString fed in, needed for getUnusedInflate
+    (IORef Bool)         -- set True when zlib indicates that inflation is complete
+    (Maybe S.ByteString) -- dictionary
 
 -- | The state of a deflation (eg, compression) process. All allocated memory
 -- is automatically reclaimed by the garbage collector.
@@ -89,6 +97,9 @@ data ZlibException = ZlibException Int
 instance Exception ZlibException
 
 -- | Some constants for the error codes, used internally
+zStreamEnd :: CInt
+zStreamEnd = 1
+
 zNeedDict :: CInt
 zNeedDict = 2
 
@@ -106,9 +117,11 @@ initInflate w = do
     fbuff <- mallocForeignPtrBytes defaultChunkSize
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
-    return $ Inflate ((fzstr, fbuff), Nothing)
+    lastBS <- newIORef S.empty
+    complete <- newIORef False
+    return $ Inflate (fzstr, fbuff) lastBS complete Nothing
 
--- | Initialize an inflation process with the given 'WindowBits'. 
+-- | Initialize an inflation process with the given 'WindowBits'.
 -- Unlike initInflate a dictionary for inflation is set which must
 -- match the one set during compression.
 initInflateWithDictionary :: WindowBits -> S.ByteString -> IO Inflate
@@ -120,7 +133,9 @@ initInflateWithDictionary w bs = do
 
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
-    return $ Inflate ((fzstr, fbuff), Just bs)
+    lastBS <- newIORef S.empty
+    complete <- newIORef False
+    return $ Inflate (fzstr, fbuff) lastBS complete (Just bs)
 
 -- | Initialize a deflation process with the given compression level and
 -- 'WindowBits'. You will need to call 'feedDeflate' to feed uncompressed
@@ -170,7 +185,14 @@ feedInflate
     :: Inflate
     -> S.ByteString
     -> IO Popper
-feedInflate (Inflate ((fzstr, fbuff), inflateDictionary)) bs = do
+feedInflate (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) bs = do
+    -- Write the BS to lastBS for use by getUnusedInflate. This is
+    -- theoretically unnecessary, since we could just grab the pointer from the
+    -- fzstr when needed. However, in that case, we wouldn't be holding onto a
+    -- reference to the ForeignPtr, so the GC may decide to collect the
+    -- ByteString in the interim.
+    writeIORef lastBS bs
+
     withForeignPtr fzstr $ \zstr ->
         unsafeUseAsCStringLen bs $ \(cstr, len) ->
             c_set_avail_in zstr cstr $ fromIntegral len
@@ -178,17 +200,24 @@ feedInflate (Inflate ((fzstr, fbuff), inflateDictionary)) bs = do
   where
     inflate zstr = do
         res <- c_call_inflate_noflush zstr
-        if (res == zNeedDict)
-            then maybe (throwIO $ ZlibException $ fromIntegral zNeedDict) -- no dictionary supplied so throw error
+        res2 <- if (res == zNeedDict)
+            then maybe (return zNeedDict)
                        (\dict -> (unsafeUseAsCStringLen dict $ \(cstr, len) -> do
                                     c_call_inflate_set_dictionary zstr cstr $ fromIntegral len
                                     c_call_inflate_noflush zstr))
                        inflateDictionary
             else return res
+        when (res2 == zStreamEnd) (writeIORef complete True)
+        return res2
 
--- | An IO action that returns the next chunk of data, returning 'Nothing' when
+-- | An IO action that returns the next chunk of data, returning 'PRDone' when
 -- there is no more data to be popped.
-type Popper = IO (Maybe S.ByteString)
+type Popper = IO PopperRes
+
+data PopperRes = PRDone
+               | PRNext !S.ByteString
+               | PRError !ZlibException
+    deriving (Show, Typeable)
 
 -- | Ensure that the given @ByteString@ is not deallocated.
 keepAlive :: Maybe S.ByteString -> IO a -> IO a
@@ -203,18 +232,19 @@ drain :: ForeignPtr CChar
       -> Popper
 drain fbuff fzstr mbs func isFinish = withForeignPtr fzstr $ \zstr -> keepAlive mbs $ do
     res <- func zstr
-    when (res < 0 && res /= zBufError)
-        $ throwIO $ ZlibException $ fromIntegral res
-    avail <- c_get_avail_out zstr
-    let size = defaultChunkSize - fromIntegral avail
-        toOutput = avail == 0 || (isFinish && size /= 0)
-    if toOutput
-        then withForeignPtr fbuff $ \buff -> do
-            bs <- S.packCStringLen (buff, size)
-            c_set_avail_out zstr buff
-                $ fromIntegral defaultChunkSize
-            return $ Just bs
-        else return Nothing
+    if res < 0 && res /= zBufError
+        then return $ PRError $ ZlibException $ fromIntegral res
+        else do
+            avail <- c_get_avail_out zstr
+            let size = defaultChunkSize - fromIntegral avail
+                toOutput = avail == 0 || (isFinish && size /= 0)
+            if toOutput
+                then withForeignPtr fbuff $ \buff -> do
+                    bs <- S.packCStringLen (buff, size)
+                    c_set_avail_out zstr buff
+                        $ fromIntegral defaultChunkSize
+                    return $ PRNext bs
+                else return PRDone
 
 
 -- | As explained in 'feedInflate', inflation buffers your decompressed
@@ -222,7 +252,7 @@ drain fbuff fzstr mbs func isFinish = withForeignPtr fzstr $ \zstr -> keepAlive 
 -- data, you will likely have some data still sitting in the buffer. This
 -- function will return it to you.
 finishInflate :: Inflate -> IO S.ByteString
-finishInflate (Inflate ((fzstr, fbuff), _)) =
+finishInflate (Inflate (fzstr, fbuff) _ _ _) =
     withForeignPtr fzstr $ \zstr ->
         withForeignPtr fbuff $ \buff -> do
             avail <- c_get_avail_out zstr
@@ -239,6 +269,24 @@ finishInflate (Inflate ((fzstr, fbuff), _)) =
 -- Since 0.0.3
 flushInflate :: Inflate -> IO S.ByteString
 flushInflate = finishInflate
+
+-- | Retrieve any data remaining after inflating. For more information on motivation, see:
+--
+-- <https://github.com/fpco/streaming-commons/issues/20>
+--
+-- Since 0.1.11
+getUnusedInflate :: Inflate -> IO S.ByteString
+getUnusedInflate (Inflate (fzstr, _) ref _ _) = do
+    bs <- readIORef ref
+    len <- withForeignPtr fzstr c_get_avail_in
+    return $ S.drop (S.length bs - fromIntegral len) bs
+
+-- | Returns True if the inflater has reached end-of-stream, or False if
+-- it is still expecting more data.
+--
+-- Since 0.1.18
+isCompleteInflate :: Inflate -> IO Bool
+isCompleteInflate (Inflate _ _ complete _) = readIORef complete
 
 -- | Feed the given 'S.ByteString' to the deflater. Return a 'Popper',
 -- an IO action that returns the compressed data a chunk at a time.
@@ -274,3 +322,17 @@ finishDeflate (Deflate (fzstr, fbuff)) =
 flushDeflate :: Deflate -> Popper
 flushDeflate (Deflate (fzstr, fbuff)) =
     drain fbuff fzstr Nothing c_call_deflate_flush True
+
+-- | Full flush the deflation buffer. Useful for interactive
+-- applications where previously streamed data may not be
+-- available. Using `fullFlushDeflate` too often can seriously degrade
+-- compression. Internally this passes Z_FULL_FLUSH to the zlib
+-- library.
+--
+-- Like 'flushDeflate', 'fullFlushDeflate' does not signal end of input,
+-- meaning you can feed more uncompressed data afterward.
+--
+-- Since 0.1.5
+fullFlushDeflate :: Deflate -> Popper
+fullFlushDeflate (Deflate (fzstr, fbuff)) =
+    drain fbuff fzstr Nothing c_call_deflate_full_flush True
