@@ -20,7 +20,7 @@
 -- file-test.hs.
 module Data.Streaming.Zlib
     ( -- * Inflate
-      Inflate
+      Inflate(..)
     , initInflate
     , initInflateWithDictionary
     , feedInflate
