@@ -3,7 +3,7 @@ config = {
     packageOverrides = pkgs: rec {
         haskellPackages = pkgs.haskellPackages.override {
             overrides = haskellPackagesNew : haskellPackagesOld : {
-                zlib-bindings =
+                zlib-bindings-awake =
                     pkgs.haskell.lib.overrideCabal
                     (haskellPackagesNew.callPackage ./default.nix { })
                     (oldDerivation: rec {
@@ -25,5 +25,5 @@ config = {
 pkgs = import <nixpkgs> { inherit config; };
 
 in
-  { zlib-bindings = pkgs.haskellPackages.zlib-bindings;
+  { zlib-bindings-awake = pkgs.haskellPackages.zlib-bindings-awake;
   }
