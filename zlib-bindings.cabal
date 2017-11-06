@@ -23,8 +23,8 @@ library
                      Data.Streaming.Zlib.Lowlevel
     ghc-options:     -Wall
     c-sources:       c/helper.c
+    include-dirs:  cbits
     if os(windows)
-        include-dirs:  cbits
         install-includes: zlib.h zconf.h
 
 test-suite test
