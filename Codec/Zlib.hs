@@ -44,7 +44,7 @@ module Codec.Zlib
     , PopperRes (..)
     ) where
 
-import Data.Streaming.Zlib.Lowlevel
+import Codec.Zlib.Lowlevel
 import Foreign.ForeignPtr
 import Foreign.C.Types
 import Data.ByteString.Unsafe

@@ -5,7 +5,7 @@ import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
 import Test.QuickCheck (Arbitrary (..))
 import Data.Foldable (fold)
-import Data.Streaming.Zlib
+import Codec.Zlib
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
