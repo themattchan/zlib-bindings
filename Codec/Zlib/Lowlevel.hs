@@ -2,7 +2,7 @@
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-module Data.Streaming.Zlib.Lowlevel
+module Codec.Zlib.Lowlevel
     ( WindowBits(..)
     , defaultWindowBits
     , ZStreamStruct

@@ -18,7 +18,7 @@
 --
 -- You can see a more complete example is available in the included
 -- file-test.hs.
-module Data.Streaming.Zlib
+module Codec.Zlib
     ( -- * Inflate
       Inflate(..)
     , initInflate
