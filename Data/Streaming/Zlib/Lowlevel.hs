@@ -1,5 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE EmptyDataDecls #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 module Data.Streaming.Zlib.Lowlevel
     ( WindowBits(..)
     , defaultWindowBits
@@ -27,6 +29,8 @@ module Data.Streaming.Zlib.Lowlevel
 
 import Foreign.C
 import Foreign.Ptr
+import Data.Typeable
+import GHC.Generics
 
 data ZStreamStruct
 type ZStream' = Ptr ZStreamStruct
@@ -40,7 +44,7 @@ data Strategy =
     deriving (Show,Eq,Ord,Enum)
 
 newtype WindowBits = WindowBits Int
-  deriving (Eq, Ord, Show, Show, Typeable, Generic)
+  deriving (Eq, Ord, Show, Typeable, Generic)
 
 defaultWindowBits :: WindowBits
 defaultWindowBits = WindowBits 15

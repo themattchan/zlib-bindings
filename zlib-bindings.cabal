@@ -19,8 +19,8 @@ extra-source-files: cbits/crc32.h cbits/inffast.h cbits/inflate.h
 library
     build-depends: base                  >= 4       && < 5
                  , bytestring            >= 0.9.1.4
-    exposed-modules: Codec.Zlib
-                     Codec.Zlib.Lowlevel
+    exposed-modules: Data.Streaming.Zlib
+                     Data.Streaming.Zlib.Lowlevel
     ghc-options:     -Wall
     c-sources:       c/helper.c
     if os(windows)
