@@ -109,9 +109,15 @@ main = hspec $ do
         it "single inflate" $ do
             gziped <- S.readFile "LICENSE.gz"
             inf <- initInflate $ WindowBits 31
-            popper <- feedInflate inf gziped
-            ungziped <- runPopper id popper
+            ungziped <- inflateChunk inf id gziped
             final <- finishInflate inf
+            (S.concat $ ungziped [final]) `shouldBe` license
+
+        it "single inflate copy" $ do
+            gziped <- S.readFile "LICENSE.gz"
+            inf <- initInflate $ WindowBits 31
+            (inf',ungziped) <- inflateChunkCopy inf id gziped
+            final <- finishInflate inf'
             (S.concat $ ungziped [final]) `shouldBe` license
 
         it "multi deflate" $ do
@@ -127,6 +133,14 @@ main = hspec $ do
             inf <- initInflate $ WindowBits 31
             ungziped' <- foldM (inflateChunk inf) id gziped'
             final <- finishInflate inf
+            (S.concat $ ungziped' [final]) `shouldBe` license
+
+        it "multi inflate copy" $ do
+            gziped <- S.readFile "LICENSE.gz"
+            let gziped' = map S.singleton $ S.unpack gziped
+            inf <- initInflate $ WindowBits 31
+            (inf',ungziped') <- foldM (uncurry inflateChunkCopy) (inf,id) gziped'
+            final <- finishInflate inf'
             (S.concat $ ungziped' [final]) `shouldBe` license
 
     describe "lbs zlib" $ do
@@ -167,7 +181,7 @@ main = hspec $ do
                     callback ("loop" ++ show (i :: Int)) bs $ flushDeflate def
                 callback "finish" "" $ finishDeflate def
         it "zlib" $ helper defaultWindowBits
-        it "gzip" $ helper $ WindowBits 31
+        it "zip" $ helper $ WindowBits 31
 
     describe "large raw #9" $ do
         let size = fromIntegral $ LI.defaultChunkSize * 4 + 1
@@ -180,6 +194,10 @@ main = hspec $ do
             output <- decompressRaw $ Raw.compress input
             L.all (== 10) output `shouldBe` True
             L.length output `shouldBe` L.length input
+        it "decompressing" $ do
+            output <- decompressRawCopy $ Raw.compress input
+            L.all (== 10) output `shouldBe` True
+            L.length output `shouldBe` L.length input
 
 rawWindowBits :: WindowBits
 rawWindowBits = WindowBits (-15)
@@ -189,6 +207,13 @@ decompressRaw gziped = do
     inf <- initInflate rawWindowBits
     ungziped <- foldM (inflateChunk inf) id $ L.toChunks gziped
     final <- finishInflate inf
+    return $ L.fromChunks $ ungziped [final]
+
+decompressRawCopy :: L.ByteString -> IO L.ByteString
+decompressRawCopy gziped = do
+    inf <- initInflate rawWindowBits
+    (inf',ungziped) <- foldM (uncurry inflateChunkCopy) (inf,id) $ L.toChunks gziped
+    final <- finishInflate inf'
     return $ L.fromChunks $ ungziped [final]
 
 compressRaw :: L.ByteString -> IO L.ByteString
