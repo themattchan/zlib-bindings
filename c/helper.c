@@ -27,12 +27,12 @@ int streaming_commons_deflate_init2(z_stream *stream, int level, int methodBits,
 	return deflateInit2(stream, level, Z_DEFLATED, methodBits, memlevel, strategy);
 }
 
-int streaming_commons_inflate_set_dictionary(z_stream *stream, const char* dictionary, 
+int streaming_commons_inflate_set_dictionary(z_stream *stream, const unsigned char* dictionary,
                             unsigned int dictLength) {
         return inflateSetDictionary(stream, dictionary, dictLength);
 }
 
-int streaming_commons_deflate_set_dictionary(z_stream *stream, const char* dictionary, 
+int streaming_commons_deflate_set_dictionary(z_stream *stream, const unsigned char* dictionary,
                             unsigned int dictLength) {
         return deflateSetDictionary(stream, dictionary, dictLength);
 }
@@ -70,7 +70,7 @@ unsigned int streaming_commons_get_avail_out (z_stream *stream)
 	return stream->avail_out;
 }
 
-char* streaming_commons_get_next_in (z_stream *stream)
+unsigned char* streaming_commons_get_next_in (z_stream *stream)
 {
 	return stream->next_in;
 }
@@ -99,4 +99,18 @@ int streaming_commons_call_deflate_full_flush (z_stream *stream)
 int streaming_commons_call_deflate_finish (z_stream *stream)
 {
 	return deflate(stream, Z_FINISH);
+}
+
+z_stream * streaming_commons_copy_z_stream_inflate (z_stream *source)
+{
+	z_stream *dest = streaming_commons_create_z_stream();
+
+	// no need to initialise, it happens in inflateCopy
+	int ret = inflateCopy(dest, source);
+	if (ret == Z_OK) {
+		return dest;
+	} else {
+		streaming_commons_free_z_stream_inflate(dest);
+		return NULL;
+	}
 }

@@ -13,6 +13,7 @@ module Codec.Zlib.Lowlevel
     , inflateInit2
     , c_free_z_stream_inflate
     , c_free_z_stream_deflate
+    , c_copy_z_stream_inflate
     , c_set_avail_in
     , c_set_avail_out
     , c_get_avail_out
@@ -76,6 +77,9 @@ foreign import ccall unsafe "&streaming_commons_free_z_stream_inflate"
 
 foreign import ccall unsafe "&streaming_commons_free_z_stream_deflate"
     c_free_z_stream_deflate :: FunPtr (ZStream' -> IO ())
+
+foreign import ccall unsafe "streaming_commons_copy_z_stream_inflate"
+    c_copy_z_stream_inflate :: ZStream' -> IO ZStream'
 
 foreign import ccall unsafe "streaming_commons_set_avail_in"
     c_set_avail_in :: ZStream' -> Ptr CChar -> CUInt -> IO ()

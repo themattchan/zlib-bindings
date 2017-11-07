@@ -46,6 +46,8 @@ module Codec.Zlib
 
 import Codec.Zlib.Lowlevel
 import Foreign.ForeignPtr
+import Foreign.Marshal.Alloc (finalizerFree)
+import Foreign.Marshal.Utils (copyBytes)
 import Foreign.C.Types
 import Data.ByteString.Unsafe
 import qualified Data.ByteString as S
@@ -115,6 +117,7 @@ initInflate w = do
     inflateInit2 zstr w
     fzstr <- newForeignPtr c_free_z_stream_inflate zstr
     fbuff <- mallocForeignPtrBytes defaultChunkSize
+    addForeignPtrFinalizer finalizerFree fbuff
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
     lastBS <- newIORef S.empty
@@ -130,7 +133,7 @@ initInflateWithDictionary w bs = do
     inflateInit2 zstr w
     fzstr <- newForeignPtr c_free_z_stream_inflate zstr
     fbuff <- mallocForeignPtrBytes defaultChunkSize
-
+    addForeignPtrFinalizer finalizerFree fbuff
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
     lastBS <- newIORef S.empty
@@ -148,6 +151,7 @@ initDeflate level w = do
     deflateInit2 zstr level w 8 StrategyDefault
     fzstr <- newForeignPtr c_free_z_stream_deflate zstr
     fbuff <- mallocForeignPtrBytes defaultChunkSize
+    addForeignPtrFinalizer finalizerFree fbuff
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
     return $ Deflate (fzstr, fbuff)
@@ -163,13 +167,32 @@ initDeflateWithDictionary level bs w = do
     deflateInit2 zstr level w 8 StrategyDefault
     fzstr <- newForeignPtr c_free_z_stream_deflate zstr
     fbuff <- mallocForeignPtrBytes defaultChunkSize
-
+    addForeignPtrFinalizer finalizerFree fbuff
     unsafeUseAsCStringLen bs $ \(cstr, len) -> do
         c_call_deflate_set_dictionary zstr cstr $ fromIntegral len
 
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
     return $ Deflate (fzstr, fbuff)
+
+copyInflate :: Inflate -> IO Inflate
+copyInflate (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) = do
+  withForeignPtr fzstr $ \zstr -> do
+    withForeignPtr fbuff $ \buff -> do
+      -- copy the zstream state
+      fzstr' <- c_copy_z_stream_inflate zstr
+                >>= newForeignPtr finalizerFree
+      -- copy the output buffer
+      -- Q: is it better to use mallocForeignPtr instead?
+      fbuff' <- mallocForeignPtrBytes defaultChunkSize
+      addForeignPtrFinalizer finalizerFree fbuff'
+      withForeignPtr fbuff' $ \ptr ->
+        copyBytes ptr buff defaultChunkSize
+      -- copy IORefs
+      lastBS' <- readIORef lastBS >>= newIORef
+      complete' <- readIORef complete >>= newIORef
+
+      return (Inflate (fzstr', fbuff') lastBS' complete' inflateDictionary)
 
 -- | Feed the given 'S.ByteString' to the inflater. Return a 'Popper',
 -- an IO action that returns the decompressed data a chunk at a time.
@@ -185,7 +208,21 @@ feedInflate
     :: Inflate
     -> S.ByteString
     -> IO Popper
-feedInflate (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) bs = do
+feedInflate st0 bs = do
+    (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) <- copyInflate st0
+
+    let inflate zstr = do
+        res <- c_call_inflate_noflush zstr
+        res2 <- if (res == zNeedDict)
+            then maybe (return zNeedDict)
+                       (\dict -> (unsafeUseAsCStringLen dict $ \(cstr, len) -> do
+                                    c_call_inflate_set_dictionary zstr cstr $ fromIntegral len
+                                    c_call_inflate_noflush zstr))
+                       inflateDictionary
+            else return res
+        when (res2 == zStreamEnd) (writeIORef complete True)
+        return res2
+
     -- Write the BS to lastBS for use by getUnusedInflate. This is
     -- theoretically unnecessary, since we could just grab the pointer from the
     -- fzstr when needed. However, in that case, we wouldn't be holding onto a
@@ -197,18 +234,6 @@ feedInflate (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) bs = do
         unsafeUseAsCStringLen bs $ \(cstr, len) ->
             c_set_avail_in zstr cstr $ fromIntegral len
     return $ drain fbuff fzstr (Just bs) inflate False
-  where
-    inflate zstr = do
-        res <- c_call_inflate_noflush zstr
-        res2 <- if (res == zNeedDict)
-            then maybe (return zNeedDict)
-                       (\dict -> (unsafeUseAsCStringLen dict $ \(cstr, len) -> do
-                                    c_call_inflate_set_dictionary zstr cstr $ fromIntegral len
-                                    c_call_inflate_noflush zstr))
-                       inflateDictionary
-            else return res
-        when (res2 == zStreamEnd) (writeIORef complete True)
-        return res2
 
 -- | An IO action that returns the next chunk of data, returning 'PRDone' when
 -- there is no more data to be popped.
@@ -252,14 +277,18 @@ drain fbuff fzstr mbs func isFinish = withForeignPtr fzstr $ \zstr -> keepAlive 
 -- data, you will likely have some data still sitting in the buffer. This
 -- function will return it to you.
 finishInflate :: Inflate -> IO S.ByteString
-finishInflate (Inflate (fzstr, fbuff) _ _ _) =
-    withForeignPtr fzstr $ \zstr ->
-        withForeignPtr fbuff $ \buff -> do
+finishInflate (Inflate (fzstr, fbuff) _ _ _) = do
+   outerRet <- withForeignPtr fzstr $ \zstr -> do
+      ret <- withForeignPtr fbuff $ \buff -> do
             avail <- c_get_avail_out zstr
             let size = defaultChunkSize - fromIntegral avail
             bs <- S.packCStringLen (buff, size)
             c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
             return bs
+      finalizeForeignPtr fbuff
+      return ret
+   finalizeForeignPtr fzstr
+   return outerRet
 
 -- | Flush the inflation buffer. Useful for interactive application.
 --
@@ -308,6 +337,7 @@ feedDeflate (Deflate (fzstr, fbuff)) bs = do
 -- | As explained in 'feedDeflate', deflation buffers your compressed
 -- data. After you call 'feedDeflate' with your last chunk of uncompressed
 -- data, use this to flush the rest of the data and signal end of input.
+-- TODO call finalizer here
 finishDeflate :: Deflate -> Popper
 finishDeflate (Deflate (fzstr, fbuff)) =
     drain fbuff fzstr Nothing c_call_deflate_finish True

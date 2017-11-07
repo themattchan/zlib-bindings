@@ -1,1 +1,1 @@
-(import ./release.nix).zlib-bindings.env
+(import ./release.nix).zlib-bindings-awake.env
