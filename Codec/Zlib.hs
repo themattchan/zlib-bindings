@@ -24,6 +24,7 @@ module Codec.Zlib
     , initInflate
     , initInflateWithDictionary
     , feedInflate
+    , feedInflateCopy
     , finishInflate
     , flushInflate
     , getUnusedInflate
@@ -117,7 +118,7 @@ initInflate w = do
     inflateInit2 zstr w
     fzstr <- newForeignPtr c_free_z_stream_inflate zstr
     fbuff <- mallocForeignPtrBytes defaultChunkSize
-    addForeignPtrFinalizer finalizerFree fbuff
+--    addForeignPtrFinalizer finalizerFree fbuff
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
     lastBS <- newIORef S.empty
@@ -133,7 +134,7 @@ initInflateWithDictionary w bs = do
     inflateInit2 zstr w
     fzstr <- newForeignPtr c_free_z_stream_inflate zstr
     fbuff <- mallocForeignPtrBytes defaultChunkSize
-    addForeignPtrFinalizer finalizerFree fbuff
+--    addForeignPtrFinalizer finalizerFree fbuff
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
     lastBS <- newIORef S.empty
@@ -151,7 +152,7 @@ initDeflate level w = do
     deflateInit2 zstr level w 8 StrategyDefault
     fzstr <- newForeignPtr c_free_z_stream_deflate zstr
     fbuff <- mallocForeignPtrBytes defaultChunkSize
-    addForeignPtrFinalizer finalizerFree fbuff
+--    addForeignPtrFinalizer finalizerFree fbuff
     withForeignPtr fbuff $ \buff ->
         c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
     return $ Deflate (fzstr, fbuff)
@@ -167,7 +168,7 @@ initDeflateWithDictionary level bs w = do
     deflateInit2 zstr level w 8 StrategyDefault
     fzstr <- newForeignPtr c_free_z_stream_deflate zstr
     fbuff <- mallocForeignPtrBytes defaultChunkSize
-    addForeignPtrFinalizer finalizerFree fbuff
+    --addForeignPtrFinalizer finalizerFree fbuff
     unsafeUseAsCStringLen bs $ \(cstr, len) -> do
         c_call_deflate_set_dictionary zstr cstr $ fromIntegral len
 
@@ -181,18 +182,33 @@ copyInflate (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) = do
     withForeignPtr fbuff $ \buff -> do
       -- copy the zstream state
       fzstr' <- c_copy_z_stream_inflate zstr
-                >>= newForeignPtr finalizerFree
+                >>= newForeignPtr c_free_z_stream_inflate
+
       -- copy the output buffer
       -- Q: is it better to use mallocForeignPtr instead?
       fbuff' <- mallocForeignPtrBytes defaultChunkSize
-      addForeignPtrFinalizer finalizerFree fbuff'
-      withForeignPtr fbuff' $ \ptr ->
-        copyBytes ptr buff defaultChunkSize
+  --    addForeignPtrFinalizer finalizerFree fbuff'
+      withForeignPtr fzstr' $ \zstr' ->
+        withForeignPtr fbuff' $ \buff' -> do
+          copyBytes buff' buff defaultChunkSize
+          -- set new output buffer
+          avail_out <- c_get_avail_out zstr'
+          c_set_avail_out zstr' buff' avail_out
+
       -- copy IORefs
       lastBS' <- readIORef lastBS >>= newIORef
       complete' <- readIORef complete >>= newIORef
 
-      return (Inflate (fzstr', fbuff') lastBS' complete' inflateDictionary)
+      return (Inflate (fzstr, fbuff) lastBS' complete' inflateDictionary)
+
+feedInflateCopy
+    :: Inflate
+    -> S.ByteString
+    -> IO (Inflate, Popper)
+feedInflateCopy st0 bs = do
+  st'@(Inflate (fzstr, fbuff) lastBS complete inflateDictionary) <- copyInflate st0
+  popper <- feedInflate st' bs
+  return (st', popper)
 
 -- | Feed the given 'S.ByteString' to the inflater. Return a 'Popper',
 -- an IO action that returns the decompressed data a chunk at a time.
@@ -208,8 +224,7 @@ feedInflate
     :: Inflate
     -> S.ByteString
     -> IO Popper
-feedInflate st0 bs = do
-    (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) <- copyInflate st0
+feedInflate (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) bs = do
 
     let inflate zstr = do
         res <- c_call_inflate_noflush zstr
@@ -285,9 +300,9 @@ finishInflate (Inflate (fzstr, fbuff) _ _ _) = do
             bs <- S.packCStringLen (buff, size)
             c_set_avail_out zstr buff $ fromIntegral defaultChunkSize
             return bs
-      finalizeForeignPtr fbuff
+      -- finalizeForeignPtr fbuff
       return ret
-   finalizeForeignPtr fzstr
+   --finalizeForeignPtr fzstr
    return outerRet
 
 -- | Flush the inflation buffer. Useful for interactive application.

@@ -110,7 +110,7 @@ z_stream * streaming_commons_copy_z_stream_inflate (z_stream *source)
 	if (ret == Z_OK) {
 		return dest;
 	} else {
-		streaming_commons_free_z_stream_inflate(dest);
+//		streaming_commons_free_z_stream_inflate(dest);
 		return NULL;
 	}
 }
