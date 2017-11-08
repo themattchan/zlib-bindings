@@ -19,6 +19,7 @@ module Codec.Zlib.Lowlevel
     , c_get_avail_out
     , c_get_avail_in
     , c_get_next_in
+    , c_get_next_out
     , c_call_inflate_noflush
     , c_call_deflate_noflush
     , c_call_deflate_finish
@@ -95,6 +96,9 @@ foreign import ccall unsafe "streaming_commons_get_avail_in"
 
 foreign import ccall unsafe "streaming_commons_get_next_in"
     c_get_next_in :: ZStream' -> IO (Ptr CChar)
+
+foreign import ccall unsafe "streaming_commons_get_next_out"
+    c_get_next_out :: ZStream' -> IO (Ptr CChar)
 
 foreign import ccall unsafe "streaming_commons_call_inflate_noflush"
     c_call_inflate_noflush :: ZStream' -> IO CInt

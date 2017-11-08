@@ -43,13 +43,21 @@ module Codec.Zlib
     , ZlibException (..)
     , Popper
     , PopperRes (..)
+
+    , FrozenInflate
+    , initInflate'
+    , feedInflateCopy'
+    , finishInflate'
     ) where
 
 import Codec.Zlib.Lowlevel
+import Foreign.Ptr
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc (finalizerFree)
 import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Storable
 import Foreign.C.Types
+import Foreign.C.String
 import Data.ByteString.Unsafe
 import qualified Data.ByteString as S
 import Data.ByteString.Lazy.Internal (defaultChunkSize)
@@ -57,6 +65,8 @@ import Data.Typeable (Typeable)
 import Control.Exception (Exception)
 import Control.Monad (when)
 import Data.IORef
+import Control.Arrow
+import System.IO.Unsafe
 
 type ZStreamPair = (ForeignPtr ZStreamStruct, ForeignPtr CChar)
 
@@ -184,31 +194,72 @@ copyInflate (Inflate (fzstr, fbuff) lastBS complete inflateDictionary) = do
       fzstr' <- c_copy_z_stream_inflate zstr
                 >>= newForeignPtr c_free_z_stream_inflate
 
+      -- fbuff' <- withForeignPtr fzstr' $ \zstr' ->
+      --             c_get_next_out zstr' >>= newForeignPtr_
+      -- withForeignPtr fbuff' $ \buff' -> do
+      --   peekCString buff' >>= error
+{-
       -- copy the output buffer
       -- Q: is it better to use mallocForeignPtr instead?
       fbuff' <- mallocForeignPtrBytes defaultChunkSize
   --    addForeignPtrFinalizer finalizerFree fbuff'
       withForeignPtr fzstr' $ \zstr' ->
         withForeignPtr fbuff' $ \buff' -> do
+--          peekCString buff >>= print
+
           copyBytes buff' buff defaultChunkSize
           -- set new output buffer
           avail_out <- c_get_avail_out zstr'
           c_set_avail_out zstr' buff' avail_out
-
+          -- let geti i = peek (buff' `plusPtr` i) :: IO CChar
+          -- print =<< traverse geti [0..10]
+-}
       -- copy IORefs
       lastBS' <- readIORef lastBS >>= newIORef
       complete' <- readIORef complete >>= newIORef
 
-      return (Inflate (fzstr, fbuff) lastBS' complete' inflateDictionary)
+      return (Inflate (fzstr', fbuff) lastBS' complete' inflateDictionary)
+
+runPopper :: ([S.ByteString] -> c) -> Popper -> IO ([S.ByteString] -> c)
+runPopper front x = do
+    y <- x
+    case y of
+      PRDone -> return front
+      PRError e -> error (show e)
+      PRNext z -> runPopper (front . (:) z) x
 
 feedInflateCopy
     :: Inflate
     -> S.ByteString
-    -> IO (Inflate, Popper)
+    -> IO (Inflate, [S.ByteString])
 feedInflateCopy st0 bs = do
-  st'@(Inflate (fzstr, fbuff) lastBS complete inflateDictionary) <- copyInflate st0
-  popper <- feedInflate st' bs
-  return (st', popper)
+--  st'@(Inflate (fzstr, fbuff) lastBS complete inflateDictionary) <- copyInflate st0
+  popper <- feedInflate st0 bs
+  bytestrings <- ($ []) <$> runPopper id popper
+  st'<- copyInflate st0
+  return (st', bytestrings)          -- FIXME the popper will mutate the state !!!!
+
+
+newtype FrozenInflate = FI (Either WindowBits Inflate)
+
+initInflate' :: WindowBits -> FrozenInflate
+initInflate' wb = FI (Left wb)  -- unsafePerformIO $ FI <$> initInflate wb
+{-# NOINLINE initInflate' #-}
+
+feedInflateCopy'
+    :: FrozenInflate
+    -> S.ByteString
+    -> (FrozenInflate, [S.ByteString])
+feedInflateCopy' (FI (Left wb)) bs = unsafePerformIO $ do
+  st0 <- initInflate wb
+  first (FI . Right) <$> feedInflateCopy st0 bs
+feedInflateCopy' (FI (Right st)) bs = unsafePerformIO $ first (FI . Right) <$> feedInflateCopy st bs
+{-# NOINLINE feedInflateCopy' #-}
+
+finishInflate' :: FrozenInflate -> S.ByteString
+finishInflate' (FI (Left _)) = mempty
+finishInflate' (FI (Right st0)) = unsafePerformIO $ finishInflate st0
+{-# NOINLINE finishInflate' #-}
 
 -- | Feed the given 'S.ByteString' to the inflater. Return a 'Popper',
 -- an IO action that returns the decompressed data a chunk at a time.
@@ -284,7 +335,7 @@ drain fbuff fzstr mbs func isFinish = withForeignPtr fzstr $ \zstr -> keepAlive 
                     c_set_avail_out zstr buff
                         $ fromIntegral defaultChunkSize
                     return $ PRNext bs
-                else return PRDone
+              else return PRDone
 
 
 -- | As explained in 'feedInflate', inflation buffers your decompressed
