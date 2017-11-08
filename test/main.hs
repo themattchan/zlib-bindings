@@ -149,47 +149,12 @@ main = hspec $ do
             final <- finishInflate inf
             (S.concat $ ungziped' [final]) `shouldBe` license
 
-        it "multi inflate copy" $ do
-            gziped <- S.readFile "LICENSE.gz"
-            let gziped' = map S.singleton $ S.unpack gziped
-            inf <- initInflate $ WindowBits 31
-            (inf',ungziped') <- foldM (\(st, k) c -> do
-                                          (inf', bss) <- feedInflateCopy st c
-                                          return (inf', (bss ++) . k)
-                                      ) (inf,id) gziped'
-            final <- finishInflate inf'
-            (S.concat $ ungziped' [final]) `shouldBe` license
 
         -- it "fkladsjfkldsjf" $ do
         --   gziped <- S.readFile "LICENSE.gz"
         --   let chunks = map S.singleton $ S.unpack gziped
 
         --   let inf = initInflate $ WindowBits
-
-        it "multi inflate copy CPS" $ do
-            gziped <- S.readFile "LICENSE.gz"
-            let gziped' = map S.singleton $ S.unpack gziped
-
-            let
-              infk = \k -> k $! (initInflate' gzipWindowBits, id)
-
-              infk2
-              -- foldr goes in reverse order
-                = foldl ( \prevk c ->
-                           \k -> prevk $! \(inflate, front) ->
-                             k  $! (fmap (\x rest -> x ++ rest))
-                                    (  (feedInflateCopy' inflate c ))
-                         )
-                  infk
-                  gziped'
-
-              xxx
-                = infk2 (\(inflate, front) ->
-                            let !fff = finishInflate' inflate
-                            in front $! [fff]
-                        )
-
-            (S.concat xxx) `shouldBe` license
 
 
     -- describe "lbs zlib" $ do
@@ -205,22 +170,78 @@ main = hspec $ do
     --         deflated' <- runPopper deflated $ finishDeflate def
     --         return $ lbs == decompress (L.fromChunks (deflated' []))
 
+    describe "Pure Inflate API" $ do
 
-        prop "UNSAFE inflate copy with cps" $ \lbs ->
+        it "multi inflate copy (inside IO)" $ do
+            gziped <- S.readFile "LICENSE.gz"
+            let gziped' = map S.singleton $ S.unpack gziped
+            inf <- initInflate $ WindowBits 31
+            (inf',ungziped') <- foldM (\(st, k) c -> do
+                                          (inf', bss) <- feedInflateCopy st c
+                                          return (inf', (bss ++) . k)
+                                      ) (inf,id) gziped'
+            final <- finishInflate inf'
+            (S.concat $ ungziped' [final]) `shouldBe` license
+
+        it "multi inflate copy (pure, CPS)" $ do
+            gziped <- S.readFile "LICENSE.gz"
+            let gziped' = map S.singleton $ S.unpack gziped
+
+            let
+              infk = \k -> k $ (initInflate' gzipWindowBits, id)
+
+              infk2
+              -- foldr goes in reverse order
+                = foldl ( \prevk c ->
+                            \k -> prevk $ \(inflate, front) ->
+                              k  $ fmap (\x y -> front ( x ++ y)) (feedInflateCopy' inflate c)
+                         )
+                  infk
+                  gziped'
+
+              xxx = infk2 (\(inflate, k) -> k [finishInflate' inflate])
+--            print xxx
+            (S.concat xxx) `shouldBe` license
+
+--         it "multi inflate copy (pure, direct style)" $ do
+--             gziped <- S.readFile "LICENSE.gz"
+--             let gziped' = map S.singleton $ S.unpack gziped
+
+--             let
+--               st0 = initInflate' gzipWindowBits
+
+-- --              infk = \k -> k $ (initInflate' gzipWindowBits, id)
+
+--               infk2
+--               -- foldr goes in reverse order
+--                 = foldl ( \prevk c ->
+--                            \k -> prevk $ \(inflate, front) ->
+--                              k  $ fmap (\x rest -> x ++ rest)
+--                                     (feedInflateCopy' inflate c )
+--                          )
+--                   infk
+--                   gziped'
+
+--               xxx
+--                 = infk2 (\(inflate, k) -> k [finishInflate' inflate])
+
+--             (S.concat xxx) `shouldBe` license
+
+        prop "property: inflate copy (pure, CPS)" $ \lbs ->
           let
             glbs = compress lbs
-            infk = \k -> k $! (initInflate' (WindowBits 15),  id)
+            infk = \k -> k $ (initInflate' (WindowBits 15),  id)
 
             infk2
               = foldl (\prevk c ->
-                         \k -> prevk $! \(inflate, front) ->
-                           k $! (fmap (\x rest -> x ++ rest))
-                                  (  (feedInflateCopy' inflate c ))
+                         \k -> prevk $ \(inflate, front) ->
+                           k $ fmap (\x rest -> front ( x ++ rest))
+                                  (feedInflateCopy' inflate c )
                        )
                 infk
                 (L.toChunks glbs)
 
-            xxxxx = infk2 (\(inflate, k) -> k $! [finishInflate' inflate] )
+            xxxxx = infk2 (\(inflate, k) -> k $ [finishInflate' inflate] )
           in
             lbs === L.fromChunks xxxxx
 
